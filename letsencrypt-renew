@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+
+exec rbfu @default ruby -x "$0"
+
+#!ruby
+
+require 'openssl'
+require 'pathname'
+
+MIN_REMAINDER = 30 * 86400
+
+root = Pathname.new('/etc/ssl/letsencrypt')
+hostnames = Dir[root.join('csr', '*.csr').to_s].map { |p| File.basename(p, '.csr') }
+next_cert = hostnames.map { |h| OpenSSL::X509::Certificate.new(root.join('live', h, 'cert.pem').read) }.min_by(&:not_after)
+
+exit unless next_cert
+
+label = next_cert.subject.to_s(OpenSSL::X509::Name::ONELINE)
+
+#puts "diff: #{next_cert.not_after - Time.now}"
+
+if next_cert.not_after - Time.now < MIN_REMAINDER
+  puts "Certificate #{label} will expire on #{next_cert.not_after}, renewing..."
+  system "acme-tiny-wrapper /srv/http/letsencrypt/"
+  puts "Reloading Nginx..."
+  system "sudo /usr/bin/systemctl reload nginx"
+else
+  puts "Nothing to do, next renewal due for #{label} on #{next_cert.not_after}"
+end

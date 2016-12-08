@@ -17,8 +17,6 @@ exit unless next_cert
 
 label = next_cert.subject.to_s(OpenSSL::X509::Name::ONELINE)
 
-#puts "diff: #{next_cert.not_after - Time.now}"
-
 if next_cert.not_after - Time.now < MIN_REMAINDER
   puts "Certificate #{label} will expire on #{next_cert.not_after}, renewing..."
   system "acme-tiny-wrapper /srv/http/letsencrypt/"

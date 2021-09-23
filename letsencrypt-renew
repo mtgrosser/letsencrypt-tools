@@ -1,4 +1,5 @@
-#!/usr/bin/env bash
+# letsencrypt-renew v2.0.1
+# 2020-09-25
 
 exec rbfu @default ruby -x "$0"
 
@@ -6,22 +7,104 @@ exec rbfu @default ruby -x "$0"
 
 require 'openssl'
 require 'pathname'
+require 'open3'
 
-MIN_REMAINDER = 30 * 86400
+module LetsEncrypt
+  ROOT = Pathname.new('/etc/ssl/server')
+  ACME_DIR = Pathname.new('/srv/www/default/.well-known/acme-challenge')
+  ACCOUNT_KEY = ROOT.join('letsencrypt.key')
+  MIN_REMAINDER = 30 * 86400
 
-root = Pathname.new('/etc/ssl/letsencrypt')
-hostnames = Dir[root.join('csr', '*.csr').to_s].map { |p| File.basename(p, '.csr') }
-next_cert = hostnames.map { |h| OpenSSL::X509::Certificate.new(root.join('live', h, 'cert.pem').read) }.min_by(&:not_after)
+  class Request
+    attr_reader :name
+    
+    class << self
+      def all
+        Dir[ROOT.join('requests', '*.csr').to_s].map { |p| File.basename(p, '.csr') }.map(&method(:new))
+      end
+    end
+    
+    def initialize(name)
+      @name = name
+      raise ArgumentError, "Certificate signing request not found at #{csr_file}" unless csr
+      crt
+    end
+    
+    def certified?
+      !!crt
+    end
+    
+    def valid_until
+      crt && crt.not_after
+    end
+    
+    def renewable?
+      return true unless certified?
+      valid_until - Time.new < MIN_REMAINDER
+    end
+    
+    def reload!
+      @crt = @csr = nil
+      !!(csr && crt)
+    end
+    
+    def renew!
+      command = "acme-tiny --account-key #{ACCOUNT_KEY.to_s} --csr #{csr_file.to_s} --acme-dir #{ACME_DIR.to_s}"
+      new_crt, status = Open3.capture2(command)
+      return false unless status.success?
+      crt_file.write(new_crt)
+      reload!
+      crt
+    end
 
-exit unless next_cert
+    def label
+      csr.subject.to_s(OpenSSL::X509::Name::ONELINE)
+    end
+    
+    def crt_dir
+      ROOT.join('certs')
+    end
+    
+    def csr_file
+      ROOT.join('requests', "#{name}.csr")
+    end
+    
+    def crt_file
+      crt_dir.join("#{name}.crt-bundle")
+    end
+    
+    def csr
+      @csr ||= OpenSSL::X509::Request.new(csr_file.read)
+    end
+    
+    def crt
+      @crt ||= OpenSSL::X509::Certificate.new(crt_file.read) if crt_file.exist?
+    end
+    
+  end
+end
 
-label = next_cert.subject.to_s(OpenSSL::X509::Name::ONELINE)
+reload = false
 
-if next_cert.not_after - Time.now < MIN_REMAINDER
-  puts "Certificate #{label} will expire on #{next_cert.not_after}, renewing..."
-  system "acme-tiny-wrapper /srv/http/letsencrypt/"
-  puts "Reloading Nginx..."
+LetsEncrypt::Request.all.each do |request|
+  if request.renewable?
+    if request.certified?
+      puts "Certificate #{request.label} will expire on #{request.valid_until}, renewing..."
+    else
+      puts "No certificate present for #{request.label}, requesting..."
+    end
+    if request.renew!
+      puts "Certificate issued for #{request.label}"
+      reload = true
+    else
+      puts "Error renewing #{request.label}"
+    end
+  else
+    puts "Nothing to do, next renewal due for #{request.label} on #{request.valid_until}"
+  end
+end
+
+if reload
+  puts "Reloading nginx..."
   system "sudo /usr/bin/systemctl reload nginx"
-else
-  puts "Nothing to do, next renewal due for #{label} on #{next_cert.not_after}"
 end
